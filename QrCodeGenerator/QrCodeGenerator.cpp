@@ -5,15 +5,27 @@
 #include "QrCodeGenerator.h"
 #include <iostream>
 #include <string>
+#include <windows.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#pragma comment (lib,"Gdiplus.lib")
+
+using namespace Gdiplus;
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 600
 
 #define CORRECTION_LEVEL "M"
 #define VERSION 10
-#define MAX_BYTES 5 //1728/8
+#define MAX_BYTES 1728/8
 #define COLS 57
 #define ROWS 57
+#define QR_SIZE 385
+#define QR_X 200
+#define QR_Y 100
+
+#define CLIPBOARD_SUCCESS 1
+#define CLIPBOARD_ERROR 0
 
 #define MAX_LOADSTRING 100
 #define static1 1
@@ -36,9 +48,11 @@ BOOL                InitInstance(HINSTANCE, int);
 void                drawQrCode(HWND hWnd);
 void                drawCode(HDC hdc, int x, int y, int width, int height);
 void                errhandler(const char*, HWND);
-void                copyToClipboardQrCode();
+void                copyToClipboardQrCode(HWND);
 const TCHAR*        stringToWchar(std::string);
-PBITMAPINFO CreateBitmapInfoStruct(HWND hwnd, HBITMAP hBmp);
+int                 CaptureAnImage(HWND);
+bool                copyimage(const TCHAR*);
+PBITMAPINFO         CreateBitmapInfoStruct(HWND, HBITMAP);
 void                alert(const TCHAR*);
 void                error(const TCHAR*);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -157,13 +171,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         hInst = ((LPCREATESTRUCT)lParam)->hInstance;
         // создаем лейбл Введите текст
             CreateWindow(TEXT("static"), TEXT("Введите текст:"),
-                WS_VISIBLE | WS_CHILD | WS_BORDER,
+                WS_VISIBLE | WS_CHILD | ES_RIGHT,
                 15, 25, 170, 20,
                 hWnd, (HMENU)static1, hInst, NULL
             );
         // создаем поле для ввода текста
             mainEdit = CreateWindow(TEXT("edit"), TEXT(""),
-                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_LEFT | ES_MULTILINE,
+                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_LEFT | ES_MULTILINE | WS_VSCROLL | ES_AUTOVSCROLL,
                 200, 15, 385, 40,
                 hWnd, (HMENU)edit1, hInst, NULL
             );
@@ -189,10 +203,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
             case ID_GENERATE:
             case button1: {
-                int bytes = GetWindowText(mainEdit, textToCode, 4096) * 2; // умножаем на 2 т.к. это wchar
+                int bytes = GetWindowText(mainEdit, textToCode, MAX_BYTES) * 2; // умножаем на 2 т.к. это wchar
                 if (bytes > MAX_BYTES) {
-                    //alert(stringToWchar("Введите не более " + std::to_string(MAX_BYTES) + " символов"));
-                    alert(L"Введите не более");
+                    alert(L"Введите не более 106 символов");
                     break;
                 }
                 // Генерируем QR-код
@@ -203,7 +216,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 break;
             case button2: {
                 if (isGenerated) {
-                    copyToClipboardQrCode();
+                    copyToClipboardQrCode(hWnd);
                 }
             }
                 break;
@@ -224,7 +237,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             HDC hdc = BeginPaint(hWnd, &ps);
             // TODO: Добавьте сюда любой код прорисовки, использующий HDC...
             if (isGenerated) {
-                drawCode(hdc, 200, 100, 385, 385);
+                drawCode(hdc, QR_X, QR_Y, QR_SIZE, QR_SIZE);
             }
             EndPaint(hWnd, &ps);
         }
@@ -264,7 +277,7 @@ void drawQrCode(HWND hWnd) {
     hdc = GetDC(hWnd);
     if (hdc != NULL)
     {
-        drawCode(hdc, 200, 100, 385, 385);
+        drawCode(hdc, QR_X, QR_Y, QR_SIZE, QR_SIZE);
 
         // освобождаем контекст
         ReleaseDC(hWnd, hdc);
@@ -278,12 +291,12 @@ void drawQrCode(HWND hWnd) {
 
 void alert(const TCHAR* item)
 {
-    MessageBoxW(NULL, item, L"Message", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(NULL, item, L"Предупреждение", MB_OK);
 }
 
 void error(const TCHAR* item)
 {
-    MessageBoxW(NULL, item, L"Message", MB_OK | MB_ICONERROR);
+    MessageBoxW(NULL, item, L"Ошибка", MB_OK | MB_ICONERROR);
 }
 
 void drawCode(HDC hdc, int x, int y, int width, int height) {
@@ -467,7 +480,185 @@ void errhandler(const char* text, HWND hwnd) {
     error((LPWSTR)text);
 }
 
-void copyToClipboardQrCode() {
-    int length = GetWindowText(mainEdit, textToCode, MAX_BYTES);
-    alert(textToCode);
+void copyToClipboardQrCode(HWND hWnd) {
+    if (isGenerated) {
+        CaptureAnImage(hWnd);
+        GdiplusStartupInput gdiplusStartupInput;
+        ULONG_PTR gdiplusToken;
+        GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
+        copyimage(L"qr-code.bmp");
+
+        GdiplusShutdown(gdiplusToken);
+;       alert(L"Код скопирован");
+    }
+}
+
+int CaptureAnImage(HWND hWnd)
+{
+    HDC hdcScreen;
+    HDC hdcWindow;
+    HDC hdcMemDC = NULL;
+    HBITMAP hbmScreen = NULL;
+    BITMAP bmpScreen;
+
+    // Retrieve the handle to a display device context for the client 
+    // area of the window. 
+    hdcScreen = GetDC(NULL);
+    hdcWindow = GetDC(hWnd);
+
+    // Create a compatible DC which is used in a BitBlt from the window DC
+    hdcMemDC = CreateCompatibleDC(hdcWindow);
+
+    if (!hdcMemDC)
+    {
+        MessageBox(hWnd, L"CreateCompatibleDC has failed", L"Failed", MB_OK);
+        DeleteObject(hbmScreen);
+        DeleteObject(hdcMemDC);
+        ReleaseDC(NULL, hdcScreen);
+        ReleaseDC(hWnd, hdcWindow);
+        return 0;
+    }
+
+    // Get the client area for size calculation
+    RECT rcClient;
+    GetClientRect(hWnd, &rcClient);
+
+    // Create a compatible bitmap from the Window DC
+    hbmScreen = CreateCompatibleBitmap(hdcWindow, QR_SIZE, QR_SIZE);
+
+    if (!hbmScreen)
+    {
+        MessageBox(hWnd, L"CreateCompatibleBitmap Failed", L"Failed", MB_OK);
+        DeleteObject(hbmScreen);
+        DeleteObject(hdcMemDC);
+        ReleaseDC(NULL, hdcScreen);
+        ReleaseDC(hWnd, hdcWindow);
+        return 0;
+    }
+
+    // Select the compatible bitmap into the compatible memory DC.
+    SelectObject(hdcMemDC, hbmScreen);
+
+    // Bit block transfer into our compatible memory DC.
+    if (!BitBlt(hdcMemDC,
+        0, 0, QR_SIZE, QR_SIZE,
+        hdcWindow,
+        QR_X, QR_Y,
+        SRCCOPY))
+    {
+        MessageBox(hWnd, L"BitBlt has failed", L"Failed", MB_OK);
+        DeleteObject(hbmScreen);
+        DeleteObject(hdcMemDC);
+        ReleaseDC(NULL, hdcScreen);
+        ReleaseDC(hWnd, hdcWindow);
+        return 0;
+    }
+
+    // Get the BITMAP from the HBITMAP
+    GetObject(hbmScreen, sizeof(BITMAP), &bmpScreen);
+
+    BITMAPFILEHEADER   bmfHeader;
+    BITMAPINFOHEADER   bi;
+
+    bi.biSize = sizeof(BITMAPINFOHEADER);
+    bi.biWidth = QR_SIZE; //bmpScreen.bmWidth;
+    bi.biHeight = QR_SIZE; //bmpScreen.bmHeight;
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    bi.biSizeImage = 0;
+    bi.biXPelsPerMeter = 0;
+    bi.biYPelsPerMeter = 0;
+    bi.biClrUsed = 0;
+    bi.biClrImportant = 0;
+
+    DWORD dwBmpSize = ((QR_SIZE * bi.biBitCount + 31) / 32) * 4 * QR_SIZE;
+
+    // Starting with 32-bit Windows, GlobalAlloc and LocalAlloc are implemented as wrapper functions that 
+    // call HeapAlloc using a handle to the process's default heap. Therefore, GlobalAlloc and LocalAlloc 
+    // have greater overhead than HeapAlloc.
+    HANDLE hDIB = GlobalAlloc(GHND, dwBmpSize);
+    char* lpbitmap = (char*)GlobalLock(hDIB);
+
+    // Gets the "bits" from the bitmap and copies them into a buffer 
+    // which is pointed to by lpbitmap.
+    GetDIBits(hdcWindow, hbmScreen, rcClient.left,
+        (UINT)QR_SIZE, //bmpScreen.bmHeight,
+        lpbitmap,
+        (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+
+    // A file is created, this is where we will save the screen capture.
+    HANDLE hFile = CreateFile(L"qr-code.bmp",
+        GENERIC_WRITE,
+        0,
+        NULL,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+
+    // Add the size of the headers to the size of the bitmap to get the total file size
+    DWORD dwSizeofDIB = dwBmpSize + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+    //Offset to where the actual bitmap bits start.
+    bmfHeader.bfOffBits = (DWORD)sizeof(BITMAPFILEHEADER) + (DWORD)sizeof(BITMAPINFOHEADER);
+
+    //Size of the file
+    bmfHeader.bfSize = dwSizeofDIB;
+
+    //bfType must always be BM for Bitmaps
+    bmfHeader.bfType = 0x4D42; //BM   
+
+    DWORD dwBytesWritten = 0;
+    WriteFile(hFile, (LPSTR)&bmfHeader, sizeof(BITMAPFILEHEADER), &dwBytesWritten, NULL);
+    WriteFile(hFile, (LPSTR)&bi, sizeof(BITMAPINFOHEADER), &dwBytesWritten, NULL);
+    WriteFile(hFile, (LPSTR)lpbitmap, dwBmpSize, &dwBytesWritten, NULL);
+
+    //Unlock and Free the DIB from the heap
+    GlobalUnlock(hDIB);
+    GlobalFree(hDIB);
+
+    //Close the handle for the file that was created
+    CloseHandle(hFile);
+
+    //Clean up
+
+    DeleteObject(hbmScreen);
+    DeleteObject(hdcMemDC);
+    ReleaseDC(NULL, hdcScreen);
+    ReleaseDC(hWnd, hdcWindow);
+
+    return 0;
+}
+
+bool copyimage(const TCHAR* filename)
+{
+    bool result = false;
+    Bitmap* gdibmp = Bitmap::FromFile(filename);
+    if (gdibmp)
+    {
+        HBITMAP hbitmap;
+        gdibmp->GetHBITMAP(0, &hbitmap);
+        if (OpenClipboard(NULL))
+        {
+            EmptyClipboard();
+            DIBSECTION ds;
+            if (GetObject(hbitmap, sizeof(DIBSECTION), &ds))
+            {
+                HDC hdc = GetDC(HWND_DESKTOP);
+                //create compatible bitmap (get DDB from DIB)
+                HBITMAP hbitmap_ddb = CreateDIBitmap(hdc, &ds.dsBmih, CBM_INIT,
+                    ds.dsBm.bmBits, (BITMAPINFO*)&ds.dsBmih, DIB_RGB_COLORS);
+                ReleaseDC(HWND_DESKTOP, hdc);
+                SetClipboardData(CF_BITMAP, hbitmap_ddb);
+                DeleteObject(hbitmap_ddb);
+                result = true;
+            }
+            CloseClipboard();
+        }
+
+        //cleanup:
+        DeleteObject(hbitmap);
+        delete gdibmp;
+    }
+    return result;
 }
