@@ -8,7 +8,9 @@
 #include <windows.h>
 #include <objidl.h>
 #include <gdiplus.h>
+#include "QrCode.h"
 #pragma comment (lib,"Gdiplus.lib")
+#pragma warning(disable:4996)
 
 using namespace Gdiplus;
 
@@ -41,13 +43,16 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // имя класса глав�
 BOOLEAN isGenerated = 0;                        // true, если qr-код сгенерирован
 HWND mainEdit;                                  // основное поле ввода
 TCHAR textToCode[4096];                         // текст из поля для ввода
+CQR_Encode qrEncode;
+bool successfulEncoding;
+int encodeImageSize;
 
 // Отправить объявления функций, включенных в этот модуль кода:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 void                drawQrCode(HWND hWnd);
 void                drawCode(HDC hdc, int x, int y, int width, int height);
-void                errhandler(const char*, HWND);
+void                errhandler(const TCHAR*, HWND);
 void                copyToClipboardQrCode(HWND);
 const TCHAR*        stringToWchar(std::string);
 int                 CaptureAnImage(HWND);
@@ -203,8 +208,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
             case ID_GENERATE:
             case button1: {
-                int bytes = GetWindowText(mainEdit, textToCode, MAX_BYTES) * 2; // умножаем на 2 т.к. это wchar
-                if (bytes > MAX_BYTES) {
+                GetWindowText(mainEdit, textToCode, MAX_BYTES);
+                if (wcslen(textToCode) > MAX_BYTES) {
                     alert(L"Введите не более 106 символов");
                     break;
                 }
@@ -307,21 +312,28 @@ void drawCode(HDC hdc, int x, int y, int width, int height) {
     hBlackPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
     hBlackBrush = CreateSolidBrush(RGB(0, 0, 0));
 
-    // нарисовать черную окружность
     SelectObject(hdc, hBlackPen);
     hOldBrush = (HBRUSH)SelectObject(hdc, hBlackBrush);
 
     // отрисовка qr-кода
-    double dx = (double)width / COLS;
-    double dy = (double)height / ROWS;
+    char buf[MAX_BYTES];
+    size_t len = wcstombs(buf, textToCode, wcslen(textToCode));
+    if (len > 0u)
+        buf[len] = '\0';
+    successfulEncoding = qrEncode.EncodeData(buf);
+    // Make and print the QR Code symbol
+    int border = 4;
+    int qrImageSize = qrEncode.m_nSymbleSize;
+    double dx = (double)width / (qrImageSize + 2 * border);
+    double dy = (double)height / (qrImageSize + 2 * border);
 
-    for (int i = 0; i < COLS; i++) {
-        for (int j = 0; j < ROWS; j++) {
-            if ((i + j) % 2 == 0) {
-                int left = x + (int)(i * dx);
-                int top = y + (int)(j * dy);
-                int right = x + (int)((i + 1) * dx);
-                int bottom = y + (int)((j + 1) * dy);
+    for (int i = 0; i < qrImageSize; i++) {
+        for (int j = 0; j < qrImageSize; j++) {
+            if (qrEncode.m_byModuleData[i][j]) {
+                int left = x + (int)((i + border) * dx);
+                int top = y + (int)((j + border) * dy);
+                int right = x + (int)((i + border + 1) * dx);
+                int bottom = y + (int)((j + border + 1) * dy);
                 Rectangle(hdc, left, top, right, bottom);
             }
         }
@@ -344,7 +356,7 @@ PBITMAPINFO CreateBitmapInfoStruct(HWND hwnd, HBITMAP hBmp)
 
     // Retrieve the bitmap color format, width, and height.  
     if (!GetObject(hBmp, sizeof(BITMAP), (LPSTR)&bmp))
-        errhandler("GetObject", hwnd);
+        errhandler(L"GetObject", hwnd);
 
     // Convert the color format to a count of bits.  
     cClrBits = (WORD)(bmp.bmPlanes * bmp.bmBitsPixel);
@@ -416,14 +428,14 @@ void CreateBMPFile(HWND hwnd, LPTSTR pszFile, PBITMAPINFO pbi,
     lpBits = (LPBYTE)GlobalAlloc(GMEM_FIXED, pbih->biSizeImage);
 
     if (!lpBits)
-        errhandler("GlobalAlloc", hwnd);
+        errhandler(L"GlobalAlloc", hwnd);
 
     // Retrieve the color table (RGBQUAD array) and the bits  
     // (array of palette indices) from the DIB.  
     if (!GetDIBits(hDC, hBMP, 0, (WORD)pbih->biHeight, lpBits, pbi,
         DIB_RGB_COLORS))
     {
-        errhandler("GetDIBits", hwnd);
+        errhandler(L"GetDIBits", hwnd);
     }
 
     // Create the .BMP file.  
@@ -435,7 +447,7 @@ void CreateBMPFile(HWND hwnd, LPTSTR pszFile, PBITMAPINFO pbi,
         FILE_ATTRIBUTE_NORMAL,
         (HANDLE)NULL);
     if (hf == INVALID_HANDLE_VALUE)
-        errhandler("CreateFile", hwnd);
+        errhandler(L"CreateFile", hwnd);
     hdr.bfType = 0x4d42;        // 0x42 = "B" 0x4d = "M"  
     // Compute the size of the entire file.  
     hdr.bfSize = (DWORD)(sizeof(BITMAPFILEHEADER) +
@@ -453,31 +465,31 @@ void CreateBMPFile(HWND hwnd, LPTSTR pszFile, PBITMAPINFO pbi,
     if (!WriteFile(hf, (LPVOID)&hdr, sizeof(BITMAPFILEHEADER),
         (LPDWORD)&dwTmp, NULL))
     {
-        errhandler("WriteFile", hwnd);
+        errhandler(L"WriteFile", hwnd);
     }
 
     // Copy the BITMAPINFOHEADER and RGBQUAD array into the file.  
     if (!WriteFile(hf, (LPVOID)pbih, sizeof(BITMAPINFOHEADER)
         + pbih->biClrUsed * sizeof(RGBQUAD),
         (LPDWORD)&dwTmp, (NULL)))
-        errhandler("WriteFile", hwnd);
+        errhandler(L"WriteFile", hwnd);
 
     // Copy the array of color indices into the .BMP file.  
     dwTotal = cb = pbih->biSizeImage;
     hp = lpBits;
     if (!WriteFile(hf, (LPSTR)hp, (int)cb, (LPDWORD)&dwTmp, NULL))
-        errhandler("WriteFile", hwnd);
+        errhandler(L"WriteFile", hwnd);
 
     // Close the .BMP file.  
     if (!CloseHandle(hf))
-        errhandler("CloseHandle", hwnd);
+        errhandler(L"CloseHandle", hwnd);
 
     // Free memory.  
     GlobalFree((HGLOBAL)lpBits);
 }
 
-void errhandler(const char* text, HWND hwnd) {
-    error((LPWSTR)text);
+void errhandler(const TCHAR* text, HWND hwnd) {
+    error(text);
 }
 
 void copyToClipboardQrCode(HWND hWnd) {
